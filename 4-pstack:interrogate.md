@@ -1,86 +1,73 @@
-# Round-6 interrogate: Agent Memory Bus stage-1 prototype (job-14)
+# Agent Memory Bus round-6 final check (job-15 re-run)
 
-Note on this document: the two reviewers reported separately. Reviewer A finished first and its report came back with the review agent. Reviewer B finished afterwards, so its results were merged here by the orchestrating session. The HTML page was built before B finished and covers reviewer A only. Both reviewers ran on `opus`. No `fable` was used.
+**Verdict.** Ready to approve as a stage-1 prototype, on one condition. D3, D4, F3, N-B1 to N-B3 and D2 are closed and work in a live `amb mcp`. F4 is only partly closed (N1 below). Its fix is a one-line change to the note text: land it before sign-off, or track it. N2 to N4 can be follow-ups.
 
-## Verdict
+**Reviewer model.** One `opus` reviewer, run through `/pstack:interrogate`. It finished before this report was written and returned 5 findings: 0 critical, 3 warning, 2 nit. I reproduced its warnings 1 to 3 live, and they appear below as N1 to N3. Orchestrator checks: `tsc --noEmit` clean and `bun test` 158 pass, 0 fail (46 s) before this review.
 
-**Ready to approve as a stage-1 prototype, after two small documentation fixes (D3, D4).** No critical findings. Reviewer A confirmed G1 live. Reviewer B found no warning-level defects: its regression hunt on `heartbeatFrom` and G3 was clean, 21 of 25 independent mutants were killed, and the full suite passed under CPU stress. Everything else is a nit or a follow-up.
+## Round-6 items
 
-Orchestrator checks: `tsc --noEmit` clean and `bun test` 152 pass, 0 fail (46 s) after the round-5 fixes. At the end of this round, `pgrep -fl 'bin/nats-server|bun test|mutate|main.ts mcp|^yes'` printed nothing.
-
-## Reviewers
-
-| Reviewer | Model | Status |
+| Item | Status | Evidence |
 |---|---|---|
-| A | opus | Finished. Live G1 verification, statusLine budget exactness, docs. 6 findings. |
-| B | opus | Finished (after the first hand-back). Regression hunt, 25 mutants, CPU-stress run. 4 nits. |
+| D3 (`statusPage` returns `{stories, active}`, header) | closed | Live run through `amb mcp` with a temp nats-server: <br>• 50 stories: no header, 50 lines. <br>• 51 stories: the first line is exactly `showing 50 of 51 stories with the most recent task activity, most recent first; pass correlation_id, or a narrower since, for the others`. <br>• 58 stories: header says `showing 50 of 58…` and 50 stories are shown. The order is the expected newest-activity list (`s20, s10, s03, s57…`, last `s09`). The whole text is 11,737 bytes, under 50,000. <br>• Named-story call: no header. <br>• Future `since`: no stories, no header. <br>• `getStatus` wraps `.stories` (bus.ts:439-441). The stale "note names them" text is gone (grep finds nothing). |
+| D4 (docs: the 50 stories with the most recent task activity, most recent first) | closed | README.md:76, SKILL.md:27 and the `get_status` description (mcp.ts:189-194) all match the code in bus.ts:461-469. |
+| N-B1 (heartbeat skew +5000 counts, +5001 does not) | closed | status.test.ts:207-210 |
+| N-B2 (null-story heartbeat ignored) | closed | status.test.ts:211-212 |
+| N-B3 (cut form inclusive at exact budget) | closed | status.test.ts:177-182 |
+| D2 (wording) | closed | I assumed D2 means the `get_decisions` description. It says "oldest first, the newest `limit` (default 50); if cut, the newest are kept". That matches `replay` with `slice(-limit)` and `wrapped(keep: "newest")`. |
+| F3 (artifact refs cut by code point, max 200) | closed | Live run with 6 refs: astral emoji at odd and even offsets, 199 ASCII characters followed by emoji, `é`, and ZWJ family sequences. Every ref came back at exactly 200 code points, as a prefix of the original, with no lone surrogate. This held for both the named and the unnamed `get_status` paths. |
+| F4 (per-story note pointing at `replay_events`) | partial | The note is present and correct when a story is cut. With 600 tasks and long ids, 426 tasks were shown, 174 omitted, and the note appeared. With 600 short ids nothing is cut and no note appears, which is correct. But the call the note names does not "list them all". See N1. |
 
-## Round-5 findings
+## New findings
 
-| ID | Status | Evidence |
-|---|---|---|
-| G1 | **closed** for picked stories | A, `re6-A/live.ts`, k = 1, 3, 10, 50 and 58 stories mixing ASCII, Cyrillic, emoji and a 600-task story. Every picked story has `correlation_id`, `done`, a numeric `lastSeq`, and task states or `tasks_omitted`. For every story, `tasks.length + tasks_omitted` equals the full task count. `done` and `lastSeq` match `get_status {correlation_id}`. Largest result 49,049 bytes (k=1); k=50 is 29,331 bytes. Stories beyond 50 are dropped without a signal (D3). B checked the budget arithmetic: the minimum share is 980 B and the shares sum to at most LINES_BUDGET. |
-| T1 | **closed** | B's mutant sweep: `sl_drop_lastSeq` and the status tests are killed (full table below). |
-| T2 | **closed** | Replay paging mutants were in the author's set, which A's and B's runs did not contradict. B did not re-run those four mutants. |
-| T3 | **closed** | B: `sl_skip_level0` to `sl_skip_level3`, `sl_level_lt`, `sl_cut_extra`, `sl_cut_no_omitted` and `sl_cut_no_loop` are all killed. One cut-boundary mutant survives (N-B3). |
-| T4 | **mostly closed** | B: `hb_always_none`, `hb_no_type`, `hb_no_task_null`, `hb_no_subject`, `hb_no_skew_bound` and `hb_skew_0` are killed. Three boundary mutants survive (N-B1, N-B2). |
-| pgrep_no_filter | **closed** | In the author's set and not contradicted. B did not re-run it. |
-| G3 | **closed** | B: the four `g3_*` mutants are killed. `publish_event` with `correlation_id:_` or `task_id:_` gives `invalid event: correlation_id custom ("_" is reserved for none)`. AMB_STORY=_ and AMB_TASK=_ are refused. Queries with `_` still work. |
-| D2 | **partial** | SKILL.md:26 still says `get_decisions` is "for a story or task" although without a `correlation_id` it is project-wide. README.md:75 says "ignored if they claim a future time" without the 5 s skew. |
+| Id | Severity | Location | Repro | Fix | Verified |
+|---|---|---|---|---|---|
+| N1 | medium | mcp.ts:112 (note text); mcp.ts:172 (`limit ?? 200`, `keep: "newest"`); bus.ts:401; README.md:76; SKILL.md:27 | Publish 1000 `task_assigned` events (64-char task ids) into story `big`. <br>• `get_status {correlation_id: "big"}` lists 426 tasks with `tasks_omitted: 574`. <br>• The note's call `replay_events {correlation_id:"big", event_type:"task_assigned"}` returns the newest 102 of 200. Following its hint (`from_seq=801 limit=98`) gives 98 more and then stops. <br>• Status plus every hint reaches 626 of 1000 tasks. The 374 tasks between them are unreachable, and nothing says more exist. <br>• Planner retries also add `task_assigned` events, so the count is per event, not per task. | Make the note say `replay_events {correlation_id, event_type: "task_assigned", from_seq: 1, limit: 1000}` and tell the agent to follow the `continue with from_seq` hints. Update README and SKILL.md the same way. Add a test that runs the named call and counts distinct `task_id`s. | Yes, live. The fixed call reached 1000 of 1000 tasks. Opus raised the same issue on its own. |
+| N2 | low | mcp.ts:105-113 (per-story notes are not counted in `LINES_BUDGET`) | 51 stories with 12 tasks each and 64-char ids. All 50 shown stories are cut, so 50 notes are added. The `get_status` text is **57,195 bytes**, over the ~50 KB contract in untrusted.ts:16. | Subtract the note bytes before splitting the share, or merge the notes into one note that lists the cut story ids. | Yes, live. Opus predicted about 58 to 61 KB. |
+| N3 | low | bus.ts:465 vs status.ts:85 | One assigned story plus one story whose only event is a worker `error`. The header says `showing 1 of 2 stories…`, but passing that other correlation_id returns nothing. With more than 50 active stories, such an empty story can also take one of the 50 places. | Count a story as active only when it has a `task_assigned` or `task_started` event. Or derive `active` from the stories that actually produce a status. | Yes, live. Opus raised it too. |
+| N4 | low (test gap) | test/proofs.test.ts:1154 (D3 uses only 58 stories) | Mutants `header_plus1`, `order_first_activity` and `active_no_task_filter` survive. See the mutants section. | Add three tests: exactly 51 active stories shows the header; an old story that becomes active again moves to the front; a story with only a no-task `error` is not counted. | Yes. The suite stays green with each mutant applied. |
+| N5 | nit | mcp.ts:100-102 | The cut keeps the tasks in first-event order, so the newest tasks are the ones dropped. The `get_status` tool description does not mention `tasks_omitted`. | Keep the tasks with the newest `lastEventSeq`, or the non-terminal ones, first. Add one clause about `tasks_omitted` to the description. | Read from the code only (opus). |
 
-## New findings, ranked
+## Mutants and survivors
 
-| ID | Severity | Location | Repro | Fix | Reviewer | Verified |
-|---|---|---|---|---|---|---|
-| D3 | Warning (docs) | README.md:76, skills/agent-memory-bus/SKILL.md:27, src/bus.ts:457 | With 58 active stories, `get_status {}` returns 50 with no header or note, and the 8 oldest disappear. Both docs still say that a story left out "is named in the note", but that branch was deleted. B independently found the same wording problem (N-B4). | Return the active count from `getStatus` and add a header such as `showing 50 of 58 stories with the most recent task activity; pass correlation_id or a narrower since`. At least delete the clause from both docs. | A, B | yes (live, A; B read the code and docs) |
-| D4 | Warning (docs) | bus.ts:456-457, README:76, SKILL.md:27, `get_status` tool description | Stories are ranked by the seq of their latest `task_assigned` or lifecycle event, newest first, and the top 50 are kept. Docs say only "up to 50". | Add one sentence: "the 50 with the most recent task activity, most recent first". | A | yes (live) |
-| F1 | Follow-up | src/mcp.ts:104-106 | Unused share is not handed on. At k=10 the result is 22,232 bytes, yet the 600-task story shows only 25 tasks. At k=50 about 20 KB goes unused. | A second pass that splits unused bytes among the stories that were cut. | A | yes (live) |
-| F2 | Nit | src/mcp.ts:93-95 | The cut loop is O(n²) (round-5 N4, still open): 600 tasks take 31 ms, 5,000 take 1,373 ms. | Binary search over n, or sum per-task bytes once. | A | yes (timed) |
-| F3 | Nit | src/mcp.ts:78 | `ref.slice(0,200)` on emoji text can end on a lone high surrogate (`isWellFormed()` is false). | Back off one code unit, or slice by code points. | A | yes (script) |
-| F4 | Nit | README:76, SKILL.md:27 | Tasks cut into `tasks_omitted` cannot be listed through `get_status`, even for a named story (600 tasks: 259 shown, 341 omitted). The docs do not say how to see them. | Point to `replay_events {correlation_id, event_type: task_assigned}`. | A | yes (live) |
-| N-B1 | Nit | test/status.test.ts:201-204, src/bus.ts:22,99 | Mutants `hb_ge` (`>` to `>=`) and `hb_skew_6s` pass 152/152. Tests use only +3 s and +30 s. The code is right: exactly +5000 ms is accepted and +5001 ms is ignored. | Assert that NOW+5000 counts and NOW+5001 does not. | B | yes (mutants and a live probe) |
-| N-B2 | Nit | src/bus.ts:97 | Mutant `hb_no_story_null` passes 152/152. With it, a heartbeat with `correlation_id: null` on `amb.hb.P.null.T.A` is accepted. | Add the null-story test next to the existing null-task test (status.test.ts:208). | B | yes (probe) |
-| N-B3 | Nit | src/mcp.ts:96 | Mutant `sl_cut_ge` (`> budget` to `>= budget`) passes 152/152. It matters only when the cut line is exactly at the budget. | Add an exact-budget assert for the `tasks_omitted` form. | B | yes (mutant) |
-| Upgrade note | Info | event schema | Events stored by an older build with `correlation_id: "_"` now fail the schema. `read` reports them as invalid and `replay {correlation_id:"_"}` drops them. Matters only for a store created by an old build. | None needed for the prototype. | B | yes (`scripts/zz_reB_legacy.test.ts`) |
+I ran 11 new mutants, each on a copy under the scratchpad, against the full suite. The unmutated suite ran once: 158/158 pass, 505 expects, 47 s.
 
-## Reviewer B: mutants and stress run
+| Mutant | Result |
+|---|---|
+| `active_picked` (`active: picked.length`) | killed (D3) |
+| `header_ge` (`>=`, header shown at 50 of 50) | killed (D3) |
+| **`header_plus1`** (`active > stories.length + 1`, so no header at 51) | **survived** |
+| `named_active` (named path `active + 1`) | killed (D3) |
+| `f4_wrong_type` (note says `task_started`) | killed (F4) |
+| `f4_wrong_id` (note shows a placeholder id) | killed (F4) |
+| `order_oldest` (sort ascending) | killed (N8, D3) |
+| **`order_first_activity`** (story ranked by its first activity in the window, not its latest) | **survived** |
+| `cp_201` (cut at 201 code points) | killed (F3, R3) |
+| `cp_199` (cut at 199 code points) | killed (F3) |
+| **`active_no_task_filter`** (drops the `e.task_id` check) | **survived** |
 
-- **25 mutants, 21 killed, 4 survived** (all on copies under `re6-B/mut/`): the survivors are `sl_cut_ge`, `hb_no_story_null`, `hb_ge` and `hb_skew_6s` (see N-B1 to N-B3). Killed: `g1_no_share`, `g1_share_x2`, `sl_skip_level0` to `sl_skip_level3`, `sl_level_lt`, `sl_cut_extra`, `sl_cut_no_omitted`, `sl_cut_no_loop`, `hb_always_none`, `hb_no_type`, `hb_no_task_null`, `hb_no_subject`, `hb_no_skew_bound`, `hb_skew_0`, `hb_no_safeparse_strict`, `g3_no_refine`, `g3_identity_no_check`, `g3_identity_story_only`, `g3_identity_task_only`.
-- **CPU stress:** full `bun test` on an unmodified copy with 15 `yes` processes running: 152 pass, 0 fail, 55.3 s, no flaky tests. P9 saw `stalled` 1023 ms after SIGKILL (bound 2600 ms). The `yes` processes were killed by pid.
-- **Real heartbeats:** a live `amb mcp` planner, worker (AMB_HEARTBEAT_MS=200) and dashboard with AMB_STALL_AFTER_MS=800 showed T1 `started` with a fresh `lastHeartbeat` in both `get_status {correlation_id:S1}` and `get_status {}`.
-- **heartbeatFrom edges:** a heartbeat dated one year in the past is accepted and reported `stalled`. An offset timestamp, a null story, story `_`, missing details, a missing `agent_id`, a wrong agent or project in the subject, and an extra subject token are all rejected.
-
-## Checked and OK
-
-- statusLine budget exactness (A, `re6-A/budget.ts`): 0 to 600 tasks, ASCII, Cyrillic, emoji and escape-heavy text, 64-character ids, large seqs, budgets from 50 to 49,000. No overshoot at any budget of 980 bytes or more. The smallest form (story header plus `tasks_omitted`) is 157 bytes at maximum sizes.
-- The shrink order that README describes matches the statusLine levels.
-- Legitimate flows still work after G3: story broadcasts, ad hoc events with no story, and a worker receiving the story broadcast through its `S1._.>` filter.
-
-## Dismissed claims
-
-None.
+The live runs above show the real code behaves correctly at the 50/51 boundary and orders stories by latest activity. Only the tests miss these cases (N4).
 
 ## Not checked
 
-- B did not re-run the T2 replay-paging mutants or `pgrep_no_filter`; they rely on the author's mutant run.
-- README and SKILL wording beyond D3, D4, D2 and the N-B4 clause.
-- `heartbeatFrom` through a NATS server restart.
-- `get_status` with `wait_ms` and `since_seq` across many stories.
-- The cost of the O(n²) cut and the heartbeat key (N3), excluded from scope.
+- Concurrency and long-poll (`wait_ms`) behaviour of `statusPage`.
+- Performance of the window scan on a large stream.
+- The opus reviewer's claim about ad hoc tasks. It says tasks started by an ad hoc `task_started` with no assignment are not covered by the F4 call. That follows from the code but was not run.
+- I wrote the D2 row on the assumption that D2 refers to the `get_decisions` description.
+- I made no edits to the source and no commits. The worktree `src/` and `test/` match my copies byte for byte.
+- `pgrep -fl 'bin/nats-server|bun test|mutate|main.ts mcp|^yes'` is empty. No process runs from the scratch dir, and the mutant copies and temp homes were removed.
 
-## Process note
+## Remaining known limitations and follow-ups
 
-At the first hand-back, reviewer B was still running, so reviewer A's agent returned an incomplete report. The orchestrating session waited for B and then merged both. All reviewer processes have ended, and the final `pgrep` check was empty.
-
-## Known limitations and follow-ups across all rounds
-
-- **Accepted limits:** no authentication of ids in stage 1 (a forged event on a matching subject still works); `cursor_status.gap` is approximate; a client that drops a result without sending a cancel is recovered with `replay_events own_scope=true`; the N3 variant (`wait_ms: 0` can cost about 1 s while un-ACKed deliveries are not yet due).
-- **Deferred:** G2 (`get_task_context` hint after `per_type_limit` skips events), N2 (store-time heartbeat skew), N3 (heartbeat key and view mismatch), N4 and F2 (O(n²) cut).
-- **New this round:** F1 (unused share not redistributed), F3 (emoji split), F4 (docs pointer for omitted tasks), the remaining D2 doc items, N-B1 to N-B3 test asserts.
-
-## Recommended next actions
-
-1. Fix D3: delete the "the note names them" clause from README.md:76 and SKILL.md:27, and ideally add a "showing N of M stories" header to `get_status`.
-2. Fix D4: add one sentence on how the 50 stories are picked.
-3. Optional, one line each: the N-B1 to N-B3 test asserts, and the D2 wording.
-4. Approve as a stage-1 prototype after items 1 and 2. Keep F1 to F4 and the deferred items as stage-2 follow-ups.
+- **Accepted stage-1 limits:**
+  - No auth or id verification.
+  - `cursor_status.gap` is approximate.
+  - N3 variant latency.
+  - Cancel-without-cancel recovery goes through `replay_events from_seq`.
+- **Deferred from earlier rounds:** G2, N2, N3, N4, F1, F2. These are the earlier rounds' ids, not the new N2 to N4 above.
+- **New from this round:**
+  - N1: fix the F4 note, README and SKILL.md wording, and add a test that runs the named call.
+  - N2: count the notes in the 50 KB budget.
+  - N3: count as active only stories that have an attempt.
+  - N4: add the three missing tests.
+  - N5: keep the newest tasks when cutting, and mention `tasks_omitted` in the tool description.
+- **Related:** `replay_events` without `from_seq` drops anything past its `limit` silently, with no "more exist" signal. N1 shows this, and it applies to every `replay_events` caller, not only F4.
