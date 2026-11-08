@@ -1,97 +1,82 @@
-# Agent Memory Bus stage-1: round-4 re-review (job-11)
+# Agent Memory Bus stage-1: round-5 re-review (job-13)
 
 ## Verdict
 
-**Not ready to approve yet. One small fix round remains.** The third fix round closed R1, R2, R4, R5, R6, B1, C1, C2 and T1, and every reviewer reproduced those closures live. Two defects should be fixed before approval. Both are small.
+**Almost ready to approve as a stage-1 prototype. One small fix round remains.** Every round-4 closure in the code reproduces live. The heartbeat, subject and planner guards hold, and the real `amb mcp` heartbeat still passes the strict rules. One Medium defect must be fixed before approval.
 
-1. **A1 (Medium).** R3 is not closed. `get_status` still replaces a whole story with `{omitted}` once the story line passes the budget, and normal, accepted events are enough to get there: 3 tasks with Cyrillic results, or 12 tasks with 20 ASCII refs each. The planner then loses `done`, `lastSeq` and every task state, so it cannot finish its loop.
-2. **B-H (Medium).** Heartbeats are cast, not parsed. One raw heartbeat on `amb.hb.*` can cause the same `{omitted}` story, or keep a dead worker `started` for ever.
+1. **G1 (Medium).** `get_status {}` silently drops whole stories. The cut note does not name them, and README.md:76 says stories are "never dropped". Reviewers A and B found this independently and both reproduced it live.
+2. **Cheap test asserts (Low, about one line each).** These are T1 to T4. They guard documented behaviour that new mutants can now break without any test failing. Examples: `lastSeq` removed from status lines, or a replay continue pointer that skips one event.
 
-Everything else can be follow-up work: the N3 variant, A2, A3, the test gaps and the nits. The suite passes 120/120 in 4 of 4 runs, including one under CPU stress. Of 85 mutants, 73 are killed.
+Everything else is a follow-up.
 
-## Reviewers (all opus, no fable; all three finished)
+## Reviewers
 
-- **Reviewer A** (`opus`). Angle: correctness and regressions. 4 new findings. Delivered its final report.
-- **Reviewer B** (`opus`). Angle: trust boundary, security and docs. 6 new findings. API and network errors stopped it twice; it was resumed both times and delivered its final report.
-- **Reviewer C** (`opus`). Angle: test quality, mutants, flakiness and token cost. 5 new findings. One network error stopped it just before the stress run; it was resumed and delivered its final report.
+All three reviewers ran on model `opus`, with no fable. All three finished and delivered final reports before this synthesis.
 
-The lead waited for all three reports before writing this one.
+| Reviewer | Model | Angle | Findings |
+|---|---|---|---|
+| A | opus | correctness and regressions | 3 new and 1 nit |
+| B | opus | trust/security guards and docs | 1 Medium and 3 nits |
+| C | opus | test quality and mutation | 5 test gaps and 2 nits |
 
-## Prior findings
+## Round-4 findings
 
 | ID | Status | Evidence |
 |---|---|---|
-| R1 | **closed** | `re4-A/r1.ts`, 8 runs: cancel a long-poll, start a new one, publish e0..e3. Each event arrived exactly once, e.g. `B=["e1","e0","e2"] all={"e1":1,"e0":1,"e2":1,"e3":1}`. Concurrent reads in one process (6 runs), an abort while an ACK was in flight (3 runs), and an abort before the handler ran (11 runs) were all clean. C's test-gap note on R1 is listed under T-R1 below. |
-| R2 | **closed** | `re4-A/r2b.ts`: at exactly 49000 lineBytes, mixing astral, Cyrillic, ASCII and `\n`, all 5 events come back with `truncated=false`. At 49001, 4 come back with `truncated=true` and the next read returns the 5th. Nothing was confirmed without being shown. |
-| R3 | **open (new variant, A1)** | A single large result is now trimmed, but a story with several results is still replaced by `{omitted}` (`re4-A/r3.ts`). |
-| R4 | **closed** | `re4-A/r4.ts`: a home that is a prefix of another gives `not-ours`, and the sibling's server stays alive. A dead pid gives `stale` and the pid file is removed. After 3 parallel `ensureServer` calls the pid file holds a dead pid, and the pgrep fallback still gives `stopped`. |
-| R5 | **closed** | `9e15`, `2147483648`, `0.5` and `0` are refused. `"0x10"`, `"1e3"` and `" 1000"` are still accepted through `Number()`, which does no harm. |
-| R6 | **closed** | `re4-A/r5.ts`: a duplicate `task_started` gives 6 beats in 600 ms. A third duplicate still runs one timer, and there are 0 beats after the result. |
-| B1 | **closed** for `amb.ev` | A and B both injected non-JSON and schema-invalid messages. `get_status` (one story and all), `replay_events` and `get_task_context` all succeed. `read_events` prints `skipped N malformed message(s) at seq ...` and no payload text. Heartbeats are a separate gap (B-H). |
-| B3 | **mostly closed** | `to_agent` is required. The `brief_ref` equality check refuses `/T2`, `s1`, `?x`, `#x`, `/../`, `%2F`, `\n`, a different case and fullwidth characters, and Token blocks the separator characters. Remaining gap: a `null` story or task (B-N1). |
-| B4 | **partial** | The tool description now gives the `brief_ref` format (`mcp.ts:94`). `README.md:73` still leaves out the no-task `error` exception. |
-| B5 | not rechecked | Accepted for stage 1, as before. |
-| C1 | **closed** | `re4-A/r2.ts`, binary search: the largest accepted ASCII, Cyrillic and astral events give lineBytes of 47986, 47986 and 47980 (limit 48000). All 24 boundary events came back byte-identical through `read_events` and `replay_events`. |
-| C2 | **closed as designed** | A 60 KB event published raw is shown with `details {omitted_bytes:180011}` in read, replay and context. |
-| C3 | **partial** | No flakiness: 120/120 in 39.9 s, 42.2 s, 39.7 s, and 51.0 s under stress on 15 cores. Token cost is measured. 12 of 85 mutants survive, and the N13 test is partly hollow (T-N13). |
-| N3 variant | **open (known)** | `re4-A/r1.ts` after a SIGKILL: `wait_ms 0` takes 1003 ms, and an event published 1 s into an 8000 ms wait arrives at 8004 ms. Cause: `bus.ts:261` fetches `num_ack_pending` messages and waits for the fetch to expire. |
-| T1 | **closed** | All 5 round-3 survivors are now killed (`re4-C/mutate5.log`). `no_call_dedupe` still survives, as the author said. `n13_inexact_sd` is killed. `n12_*` no longer apply because the regex is gone, and the mutants that replace them are killed. |
+| A1 (status `{omitted}`) | **closed** | `re5-A/s2.ts` (live MCP). `cyr3` gives `done=true lastSeq=9`, 3 tasks `completed`, `artifact_count=20`. `ascii12` keeps all 12 tasks. `re5-A/s1.ts` ran 1500 random stories (1 to 600 tasks, Cyrillic, emoji, U+2028, lone surrogates). Result: `bad: 0, maxBytes: 49000`. correlation_id, done and lastSeq are preserved, and `tasks.length + tasks_omitted == n`. A sweep of 1 to 799 tasks had 0 over budget. |
+| B-H (heartbeats cast) | **closed** | `re5-B/live.ts` and `live.log`. The stream reports `max_msg_size 4096` and rejects a 5000 B heartbeat. A heartbeat dated 2999 gives `stalled`. +4 s gives `started` and +6 s gives `stalled`. A foreign-subject heartbeat and a non-schema heartbeat are both ignored. A legit heartbeat from a real `amb mcp` process (spawned with the MCP SDK stdio client) passes. Stalled detection fires 2.2 s after the worker closes. |
+| A3 (keep newest) | **closed** (one gap, G2) | `re5-A/s2.ts`. `get_decisions` returns `[d2,d3]` with the hint `from_seq=56 limit=2`. Pasting the hint returns exactly `[d0,d1]`. Replay without from_seq is also exact. |
+| T-N13 | **closed** | The fake is `/bin/sh -c "sleep 20; :"` and the test asserts it is alive. The mutants `n13_no_name_check` and `r4_sd_prefix` are killed. |
+| T-pgrep | **closed** (one gap) | The mutant `r4_no_pgrep_fallback` is killed. The `servesHome` filter after pgrep is unasserted (`pgrep_no_filter` survives). |
+| B-N1 (null story/task) | **closed** | Live run gives `invalid event: task_id custom (task_assigned needs a story and a task)`. Mutant killed. |
+| B-N2 (planner AMB_STORY) | **closed** | Live run gives `a planner bound to a story assigns only in its own story (S2)`. Mutant killed. |
+| B-N3 (error echo) | **closed** | 8 hostile inputs, none echoed. Mutant killed. |
+| B-N4 (truncation count) | **closed** | bus.ts:306. Mutant killed. |
+| B-S (subject == subjectFor) | **closed** | 193 legitimate events with edge tokens (`_`, `-`, `__`, 64-char, `0`, null story/task) gave `invalid: none` (`re5-A/s3.ts`). A forged message on a mismatched subject is skipped. A forge on a matching subject still works, which is the accepted stage-1 no-auth limit (README.md:77). |
+| README:73 | **closed** | The no-task `error` exception is documented. |
+| D docs | **partial** | See D2 below. |
+| Surviving-mutant asserts | **partial** | All round-4 survivors are now killed (`bh_no_subject`, `bh_no_schema`, `bn3_echo_message`, `a1_*`). The "97 mutants, 0 survive" claim holds only for the author's own set. Reviewer C's 44 new mutants of this round's code gave 28 killed and 16 survived (lead recount of `re5-C/new*.log`; C's summary said 43/29/14). |
+| A2 docs | **closed** | Reviewer B checked tool names, arguments, limits and env vars side by side. |
 
-## New findings, by severity
+## New findings, ranked
 
 | ID | Severity | Location | Repro | Fix | Reviewer | Verified |
 |---|---|---|---|---|---|---|
-| A1 | **Medium** | `src/mcp.ts:25-29` (`fit`), `mcp.ts:56-72` (`trimStatus`) | Each result is capped at 20 artifacts of 200 chars, but the story line has no cap. Chars are capped, not escaped bytes: a non-ASCII char costs 6 bytes, so one Cyrillic result is about 28 KB. Over `LINES_BUDGET`, `fit()` finds no `payload` and returns `{omitted}`. Accepted events that trigger it: 3 tasks with Cyrillic results, or 12 tasks with 20 ASCII refs each. Output: `item keys=omitted done=undefined tasks=undefined`, also in `get_status {}` (`re4-A/r3.ts`). The note text ("details are larger") is also wrong here. | Budget the status line with `lineBytes`. Drop artifacts first and keep `artifact_count`. Never let `fit()` replace an item that has no `payload`. | A | yes (live; lead confirmed `fit()` at mcp.ts:28) |
-| B-H | **Medium** | `src/bus.ts:390-403` (`m.json<AmbEventT>()` cast), `status.ts:22-25,48` | A raw heartbeat with a 1 MB `timestamp` (AMB_HB has no `max_msg_size`) turns the story into `{"omitted":"item of 990499 bytes..."}`. A timestamp of `2999-...` keeps a dead worker `started`. A heartbeat on another story's subject that names `w-S1-T3-1` hides T3's stall (`re4-B/live.ts`, `live2b.ts`). The design calls for a strict heartbeat schema. | Parse with `AmbEvent`/`HeartbeatDetails`. Require the subject to equal `hbSubject(...)` of the event's own fields. Ignore future timestamps. Set `max_msg_size` on AMB_HB. | B | yes (live; lead confirmed the cast) |
-| A3 | Low | `src/mcp.ts:47-49`, `mcp.ts:137`, `mcp.ts:143` | `get_task_context` and `get_decisions` pick the newest events, but `wrapped()` keeps the head, so a truncated result drops the newest. The note says `continue with from_seq=2`, a parameter neither tool accepts, so `pageHint` is never shown. 3 decisions of 30 KB each give `items ["d0"] / continue with from_seq=2` (`re4-A/r6.ts`). | Keep the tail for these tools and always use `pageHint`, or point the note at `replay_events from_seq`. | A | yes (live; lead confirmed by code read) |
-| A2 | Low | `src/bus.ts:306-310`, `mcp.ts:113-117`, `SKILL.md` read_events row, `README.md:74` | A cancel that arrives after the handler has returned is dropped by the SDK. The batch stays held, the next call ACKs it, and the agent sees only `confirmed previous batch seq 3..5` (`re4-A/r5.ts`, response dropped on purpose). In 6 natural client races Bun delivered the response before the timer fired, so this window was not observed without the forced drop. | Fix the docs: on `confirmed a..b` with no result seen, replay that range. Or NAK the held batch on a late cancel. | A | yes (forced loss only) |
-| T-N13 | Low | `test/proofs.test.ts:781-790`, `src/server.ts:53` | The fake `bun -e ... -sd <home>/jetstream` exits at once with `error: Invalid Argument '-s'` (lead reproduced). `ps` then shows `<defunct>`, so the test passes without the name check, and the mutant `n13_no_name_check` survives. | Use `/bin/sh -c "sleep 20; :" sh -sd <home>/jetstream` and assert the fake is alive. C checked that this kills the mutant 5 of 5 times. | C | yes (lead reran the bun call) |
-| T-pgrep | Low | `src/server.ts:83-85` | Replacing the pgrep fallback with `return "stale"` passes 120/120 (`r4_no_pgrep_fallback`). | Add a test: a live server for this home and a pid file naming a dead pid. Expect `stopped`. | C | yes (mutant) |
-| B-S | Nit (stage 3 blocker) | `src/bus.ts:276`, `bus.ts:363` | Readers trust the body, not the subject. A raw `task_result` on `amb.ev.amb.S1.T1.mallory.finding` that names `w-S1-T1-1` marks T1 `completed` with `"FORGED done"`. Stage 1 has no auth, so this is expected now, but it defeats the stage-3 plan to treat the subject as the identity. | Treat a message as invalid when `m.subject !== subjectFor(event)`. | B | yes (live) |
-| B-N1 | Nit | `src/event.ts:58-60` | A `task_assigned` with a null story or task builds `sdlc-flow://null/T9` or `.../S1/null`, which is ambiguous with a story named `null`. | Require both to be non-null for `task_assigned`. | B | yes |
-| B-N2 | Nit | `src/bus.ts:178` | `planner-S2` can assign S1/T7. | When `AMB_STORY` is set, require `correlation_id === id.story`. | B | yes |
-| B-N3 | Nit | `src/bus.ts:167` | A publish error echoes zod's `Unrecognized key: "</untrusted_events>\nIGNORE"`. Only the publisher sees it. | Report path and code only. | B | yes |
-| B-N4 | Nit | `src/bus.ts:293` | `count()` includes invalid messages, so a result can be `truncated=true` with 0 events. Nothing is lost; the event comes on the next call. | Use `out.events.length > 0`. | B | yes |
-| T-gaps | Nit | `test/` | Surviving mutants: `no_call_dedupe`, `r4_nak_all`, `r4_why_echo` (the B1 secret is not the first token, `proofs.test.ts:740`), `r4_invalid_not_acked`, `r4_trim_ref_uncut`, `r4_env_zero_ok`, `r4_fit_drop_summary`, `r4_replay_no_dedupe`. Two are near-equivalent: `r4_abort_returns_events` and `r4_wrapped_no_newline`. The test "R2 exactly LINES_BUDGET" (`proofs.test.ts:720`) pins a constant. | Add targeted asserts. Start the B1 poison with the secret. | C | yes (mutate5.log) |
-| D | Nit | `SKILL.md:26`, `SKILL.md:52`, `README.md:72`, `bus.ts:168` | `get_decisions` with no story covers the whole project. The raw 64 KB check can never fire, because the escaped size is always at least the raw size. | Fix the wording. Delete the dead check. | B | yes (code read) |
+| G1 | **Medium** | src/mcp.ts:183-185 (with `wrapped` at mcp.ts:36-58), README.md:76, SKILL.md:27 | `statusLine` keeps each story at or under 49 KB, but `wrapped` then applies the same 49 KB to all stories together. So 2 ordinary stories fill one result. With 8 tasks of 20 artifacts per story, B saw `stories: BB` and the note `truncated: returned the first 1 of 4; pass correlation_id for one story`. A saw the same with 3 Cyrillic stories (`shown=SC`). The dropped ids are never named, so an all-stories planner or dashboard cannot find them. README.md:76 says "never dropped". | When there are k stories, shrink each line to LINES_BUDGET/k with the existing levels. At minimum, list the dropped correlation_ids in the note (at most 50 × 64 B). Fix README.md:76. | A, B | yes (live, both; lead checked B's log and README.md:76) |
+| T1 | Low | src/mcp.ts:89; test/proofs.test.ts:335,358,393 | The mutant `sl_drop_lastSeq` survives with 132/132 passing. The planner-loop tests fall back to "next new event" and still finish. | Assert `typeof lastSeq === "number"` on status lines, including the cut form. Add a test where an event lands between two calls and `get_status({since_seq, wait_ms})` returns at once. | C | yes (mutant; lead confirmed in `re5-C/new1.log`) |
+| T2 | Low | src/mcp.ts:51-52, 156-157 | The mutants `replay_always_head`, `replay_always_newest`, `hint_head_next_plus1` (silent skip of one event) and `hint_head_next_minus1` all survive. | Page a truncated replay with from_seq by following the pointer, and assert the union of pages has no gap or duplicate. Assert that replay without from_seq keeps the newest event. | C | yes (mutants) |
+| T3 | Low | src/mcp.ts:82-87, 94; test/proofs.test.ts:1013-1037 | The mutants `sl_skip_summaries_step`, `sl_skip_compact_step` and `sl_compact_drops_state` survive. No fixture fits exactly at step 3 or step 4, and task states in the cut form are not asserted. | Add two fixtures sized for steps 3 and 4. Add `expect(b.tasks.every(t => t.state === "assigned"))`. | C | yes (mutants) |
+| T4 | Low | src/bus.ts:22, 414-416 | The mutants `hb_skew_60s`, `hb_skew_0`, `hb_no_type_check` and `hb_no_task_null_check` survive. A schema-valid `finding` on a correct `amb.hb` subject is untested. | Add a heartbeat at now+30 s (must be ignored) and a non-heartbeat event_type on a correct hb subject. | C | yes (mutants) |
+| G2 | Low | src/mcp.ts:53-55, 164; SKILL.md:25, README.md:76 | After `per_type_limit` the context is not a contiguous seq range. With d1, f1 to f4 and `per_type_limit=3`, the result is `[f3,f4]` with the hint `from_seq=69 limit=2`. The hint returns `[d1,f1]`, so f2 is never shown. | For get_task_context, list the omitted seqs, or hint `replay_events task_id=… from_seq=<oldest>` with no limit. | A (B traced the same by hand) | yes (live, A) |
+| G3 | Low | src/event.ts:9-11, 67-68; src/identity.ts:67 | Token allows `_`, which is also the null placeholder in subjects. `replay_events correlation_id=_` returns null-story events too. A worker with `AMB_TASK=_` builds two identical filters, so NATS fails with `consumer subject filters cannot overlap` and `amb mcp` dies at startup. | Reserve `_`: reject it for story and task ids and for AMB_STORY and AMB_TASK. | A | yes (live; lead confirmed the regex and the filter code) |
+| N2 | Nit | src/bus.ts:416 | The future check runs at read time. A +6 s heartbeat is rejected, then accepted 1.6 s later and keeps a dead task `started` until T plus the stall threshold. | Compare against the message store time (`m.info.timestampNanos`) plus the skew. | B | yes (live) |
+| N3 | Nit | src/status.ts:41, src/bus.ts:402 | A self-consistent heartbeat on `amb.hb.amb.ZZ.ZZ.w-S1-T3-1` marks S1/T3 `started` in `get_status {}` but not in `{correlation_id:S1}`, so the two views disagree. No new forging power under no-auth. | Key heartbeats by story, task and agent. | B | yes (live) |
+| N4 | Nit | src/mcp.ts:94-97 | The cut loop is O(n²): 5000 tasks take 1.5 s, and 50 stories of 600 tasks take 2.4 to 3.5 s CPU. Most of that work is then discarded by G1. | Binary search over n, or sum per-task bytes once. | A | yes (timed) |
+| D2 | Nit | SKILL.md:8, 26, 50-51; mcp.ts:118, 120; README.md:75 | (1) "story and task are stamped, you cannot choose": semantic events accept `task_id`/`correlation_id` (bus.ts:169-170). (2) get_decisions "for a story or task" is project-wide without correlation_id. (3) The planner AMB_STORY rule is missing from the guide and the tool description. (4) "ignored if future": there is a 5 s skew. | Doc edits. | B | yes (side-by-side read) |
+| T5 | Nit | test/proofs.test.ts (B-N3, A3, C2) | Tests compare exact Zod issue text and note prose. These are brittle across a Zod upgrade but are acceptable as contract text. | Match the code and path only. | C | yes (read) |
 
-Token cost per event (C, estimated without a tokenizer):
-
-| Text | Escaped size vs raw JSON | Approx. tokens |
-|---|---|---|
-| English | same | 114 |
-| Cyrillic | 1.68 times | +76% |
-| CJK | 1.19 times | +37% |
-| Emoji | 1.13 times | +23% |
-| Code with many `<` and `>` | 1.18 times | +31% |
+Also noted, not raised: the last-resort cut keeps the oldest tasks (`compact.slice(0, n)`), so the newest, most active tasks are the ones hidden (A).
 
 ## Dismissed claims
 
-- **A4, a 60 s hang in one run.** It did not reproduce in 15 further runs, and it happened at load average 18 while three reviewers ran in parallel. Unverified, so dropped.
-- **Deep JSON nesting as a DoS.** Bun parses and stringifies 30,000 levels without trouble (`re4-B/deep.ts`).
-- **Ambiguous or path-traversing `brief_ref` through `/`, `?`, `#`, `..` or `%2F` in ids.** Token rejects these characters at the schema.
-
-## Answers to the two direct questions
-
-- **Can an event be accepted at publish but never be read in full?** Not through `publish_event`: every accepted event reads byte-identical. A raw NATS publish up to 64 KB can be, and it is shown as `omitted_bytes`, as designed (C2). In `get_task_context` and `get_decisions` a truncated result hides the newest events (A3), but they stay readable through `replay_events`.
-- **Can an ACKed event be invisible to the agent?** Only when a result is lost after the handler has returned (A2), and raw oversized events are ACKed with their details hidden. No other path ACKs an unseen event.
+- **"97 mutants, 0 survive" means full coverage of this round.** It holds only for the author's set. 16 new mutants survive. Reviewer C's own summary miscounted (43/29/14); the lead recount from `re5-C/new*.log` is 44/28/16.
+- **`fit_no_payload_guard` survival is a gap.** Dismissed. The mutant is equivalent because `statusLine` already keeps every line within budget (C).
+- **`sl_budget_off_by_one` and `hint_limit_plus1` survivals.** These are boundary or prose only and low value. A's 1500-story sweep shows the byte budget is exact.
+- **Forged events on a matching subject (B-S) and heartbeat-flood volume.** Accepted stage-1 no-auth limit, already documented in README.md:77.
+- **Known accepted limits (N3-variant latency, no auth, approximate `cursor_status.gap`, cancel recovery via replay_events).** Not re-litigated, per the brief.
 
 ## Not checked
 
-- How a real MCP host behaves on a late cancel. A2 was forced by dropping the response.
-- A failed `ackAck` in the middle of a confirmed range.
-- Runtime repros for the `r4_nak_all` race, replay of duplicate stored messages, and redelivery of un-ACKed invalid messages (max_deliver is -1).
-- Heartbeat floods across many subjects.
-- Real tokenizer counts.
-- B5 replay scan cost.
-- At what size a normal planner's story line overflows without unusual content.
+- About 80 older mutants from mutate6 were not rerun. C sampled 44, all new.
+- A heartbeat flood across many subjects (AMB_HB has no `max_msgs`/`max_bytes`, only `max_age` 1 h), and the cost of draining heartbeats in `get_status {}`.
+- A real MCP host's late-cancel behaviour.
+- tsc was not rerun by reviewers. The orchestrator's clean result stands.
 
-**Process rules.** One of B's runs was moved to the background by the tool after 180 s. B reran it in the foreground and found no leftover process. C's stress wrapper stalled because `kill` failed under zsh; C killed the `yes` processes by pid. The lead's final `pgrep -fl 'nats-server|bun test|mutate'` is empty, and there are no `yes` processes. The worktree is untouched (`git status` shows only the same untracked files), and every mutant ran on `re4-C/repo`.
+**Suite and process.** Three runs gave 132/132 in 44.6 s, 45.1 s and 45.2 s. One run under CPU stress (15 `yes` processes) gave 132/132 in 67.9 s, with no flakes. C killed the `yes` processes by PID and none remain. The final lead check of `pgrep -fl 'bin/nats-server|bun test|mutate|main.ts mcp'` is empty, and `pgrep -x yes` is empty. The worktree is unchanged: `git status` shows only the same untracked files. All mutants ran on copies under `re5-C/`.
 
 ## Recommended next actions
 
-1. Fix A1. Budget the status line with `lineBytes`, drop artifacts before anything else, and make `fit()` never return `{omitted}` for a status item. Add the `re4-A/r3.ts` Cyrillic and 12-task cases as tests.
-2. Fix B-H. Parse heartbeats with the schema, check the subject, ignore future timestamps, and set `max_msg_size` on AMB_HB.
-3. Fix A3. Keep the newest events in the context tools and show the right page hint.
-4. Fix T-N13 (a fake that stays alive) and add the pgrep fallback test.
-5. Follow-up: the N3 variant, A2 docs, B-S (before stage 3), B-N1 to B-N4, the D doc fixes, `README.md:73`, and the targeted asserts for the surviving mutants.
+1. Fix G1. Budget `get_status {}` across stories (LINES_BUDGET/k per line using the existing shrink levels), or at least name the dropped correlation_ids in the note. Correct README.md:76 and SKILL.md:27. Add a test with 3 stories of about 30 KB each.
+2. Add the cheap asserts T1 to T4: lastSeq present, task states in the cut form, fixtures for steps 3 and 4, replay pagination union, and heartbeat skew and type boundary tests.
+3. Follow-up, not blocking: G2 (get_task_context hint), G3 (reserve `_`), N2 (store-time skew), N3 (heartbeat key), N4 (O(n²) cut), D2 doc edits, and the `pgrep_no_filter` assert.
+4. Run a short round-6 check limited to G1 and the new asserts. A full panel is not needed.
