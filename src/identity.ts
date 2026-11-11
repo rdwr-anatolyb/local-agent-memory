@@ -2,8 +2,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { isToken } from "./event";
 
-export type Role = "worker" | "planner" | "dashboard" | "agent";
-const ROLES: Role[] = ["worker", "planner", "dashboard", "agent"];
+export type Role = "worker" | "planner" | "dashboard" | "agent" | "orchestrator";
+const ROLES: Role[] = ["worker", "planner", "dashboard", "agent", "orchestrator"];
 
 export type Thresholds = { stallAfterMs: number; claimTimeoutMs: number; quietAfterMs: number };
 
@@ -61,6 +61,8 @@ export function readIdentity(env: Env): Identity {
   const story = token("AMB_STORY", role === "worker");
   const task = token("AMB_TASK", role === "worker");
   for (const [k, v] of [["AMB_STORY", story], ["AMB_TASK", task]]) if (v === "_") throw new Error(`${k} cannot be "_" (reserved for none)`);
+  // A stamped default story would quietly file events for other stories under this one.
+  if (role === "orchestrator" && (story || task)) throw new Error("orchestrator acts on every story in its project; unset AMB_STORY and AMB_TASK");
 
   const P = `amb.ev.${projectId}`;
   let filter: string[];
@@ -68,6 +70,7 @@ export function readIdentity(env: Env): Identity {
   if (role === "worker") filter = [`${P}.${story}.${task}.>`, `${P}.${story}._.>`];
   else if (role === "planner") filter = [story ? `${P}.${story}.>` : `${P}.>`];
   else if (role === "dashboard") [filter, cursorStart] = [[`${P}.>`], "new"];
+  else if (role === "orchestrator") filter = [`${P}.>`];
   else {
     filter = get("AMB_FILTER")?.split(",").map((s) => s.trim()) ?? [`${P}.>`];
     // Stage 1 has no auth; at least keep an ad hoc cursor inside its own project.

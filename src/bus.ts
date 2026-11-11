@@ -6,7 +6,7 @@ import {
   type OrderedConsumerOptions, type StreamConfig,
 } from "@nats-io/jetstream";
 import {
-  AmbEvent, filterFor, hbSubject, LIFECYCLE, MAX_EVENT_BYTES, subjectFor,
+  AmbEvent, FLOW_EVENTS, filterFor, hbSubject, LIFECYCLE, MAX_EVENT_BYTES, subjectFor,
   type AmbEventT, type EventType, type StoredEvent,
 } from "./event";
 import type { Identity } from "./identity";
@@ -71,8 +71,18 @@ const issuesText = (e: z.ZodError) =>
   e.issues.map((i) => `${i.path.join(".") || "(root)"} ${i.code}${i.code === "custom" ? ` (${i.message})` : ""}`).join("; ").slice(0, 300);
 /** Why a stored message is unreadable, without echoing any of its text. */
 const why = (e: unknown) => (e instanceof z.ZodError ? `schema: ${issuesText(e)}` : e instanceof Error && e.message === "subject" ? "subject does not match the event" : "not valid JSON");
+/** Every temporary ordered consumer goes through here so it is deleted, never left for inactive_threshold. */
+export async function withOrdered<T>(js: JetStreamClient, stream: string, opts: Partial<OrderedConsumerOptions>, f: (c: Consumer) => Promise<T>): Promise<T> {
+  const c = await js.consumers.get(stream, opts);
+  try {
+    return await f(c);
+  } finally {
+    await c.delete().catch(() => {});
+  }
+}
+
 /** A stored message as an event, or a throw: valid JSON, the schema, and a subject that agrees with the event's own fields. */
-function parseStored(m: JsMsg): StoredEvent {
+export function parseStored(m: JsMsg): StoredEvent {
   const ev = AmbEvent.parse(m.json());
   if (m.subject !== subjectFor(ev)) throw new Error("subject");
   return { ...ev, seq: m.seq };
@@ -201,23 +211,32 @@ export class MemoryBus {
     const { id } = this;
     if (id.role === "dashboard") throw new Error("role dashboard is read-only; publish_event is refused");
     if (input.event_type === "heartbeat") throw new Error("heartbeat is sent by the amb MCP process itself, not published");
-    if (input.event_type === "task_assigned" && id.role !== "planner") throw new Error("only AMB_ROLE=planner may publish task_assigned");
+    if (FLOW_EVENTS.has(input.event_type) && id.role !== "orchestrator") throw new Error(`only AMB_ROLE=orchestrator may publish ${input.event_type}`);
+    if (input.event_type === "task_assigned" && id.role !== "planner" && id.role !== "orchestrator")
+      throw new Error("only AMB_ROLE=planner or orchestrator may publish task_assigned");
     if (input.event_type === "task_assigned" && id.story && (input.correlation_id ?? id.story) !== id.story)
       throw new Error(`a planner bound to a story assigns only in its own story (${id.story})`);
     const ev = this.build(input);
     if (LIFECYCLE.has(ev.event_type)) {
-      // Lifecycle events describe the publisher's own work; a third party cannot start, finish or fail someone's task.
-      // A no-task identity may report an `error` about itself only (task null, story null or its own).
-      if ((!id.story || !id.task) && ev.event_type !== "error")
-        throw new Error(`${ev.event_type} needs an identity with AMB_STORY and AMB_TASK; it reports on your own task`);
-      if (ev.correlation_id !== (id.story ?? null))
-        throw new Error(`${ev.event_type} must be about your own story (${id.story ?? "none"})`);
-      if (ev.task_id !== (id.task ?? null)) throw new Error(`${ev.event_type} must be about your own task (${id.task ?? "none"})`);
+      if (id.role === "orchestrator") {
+        // It has no task of its own: it speaks for the assignee it names, and status checks that it assigned that attempt.
+        if (!ev.correlation_id || !ev.task_id || !ev.to_agent)
+          throw new Error(`${ev.event_type} from an orchestrator needs correlation_id, task_id and to_agent (the attempt's assignee)`);
+      } else {
+        // Lifecycle events describe the publisher's own work; a third party cannot start, finish or fail someone's task.
+        // A no-task identity may report an `error` about itself only (task null, story null or its own).
+        if ((!id.story || !id.task) && ev.event_type !== "error")
+          throw new Error(`${ev.event_type} needs an identity with AMB_STORY and AMB_TASK; it reports on your own task`);
+        if (ev.correlation_id !== (id.story ?? null))
+          throw new Error(`${ev.event_type} must be about your own story (${id.story ?? "none"})`);
+        if (ev.task_id !== (id.task ?? null)) throw new Error(`${ev.event_type} must be about your own task (${id.task ?? "none"})`);
+      }
     }
     // Scoped so two agents (or projects) choosing the same event_id never dedupe each other.
     const pa = await this.js.publish(subjectFor(ev), JSON.stringify(ev), { msgID: dedupeKey(ev) });
+    // One orchestrator serves many tasks, so its lifecycle events never start this process's heartbeat.
     // A duplicate task_started (a retry after a restart) still means this process is working on the task.
-    if (ev.event_type === "task_started" && !this.hbActive) {
+    if (ev.event_type === "task_started" && !this.hbActive && id.role !== "orchestrator") {
       this.hbActive = true; // reserved before any await, so concurrent starts cannot both get here
       await this.startHeartbeat(ev, pa.seq);
     }
@@ -345,14 +364,8 @@ export class MemoryBus {
     return out;
   }
 
-  /** Every temporary ordered consumer goes through here so it is deleted, never left for inactive_threshold. */
-  private async withOrdered<T>(stream: string, opts: Partial<OrderedConsumerOptions>, f: (c: Consumer) => Promise<T>): Promise<T> {
-    const c = await this.js.consumers.get(stream, opts);
-    try {
-      return await f(c);
-    } finally {
-      await c.delete().catch(() => {});
-    }
+  private withOrdered<T>(stream: string, opts: Partial<OrderedConsumerOptions>, f: (c: Consumer) => Promise<T>): Promise<T> {
+    return withOrdered(this.js, stream, opts, f);
   }
 
   /** Reads everything an ordered consumer can see right now. */
@@ -484,6 +497,9 @@ export class MemoryBus {
   /** Stops the heartbeat. The last batch stays un-ACKed on purpose: the session may not have used it. */
   async close() {
     this.stopHeartbeat();
-    if (!this.nc.isClosed()) await this.nc.drain();
+    if (this.nc.isClosed()) return;
+    // drain waits for a PONG; a connection that lost its server never gets one, so close it after a bound.
+    await Promise.race([this.nc.drain().catch(() => {}), Bun.sleep(2000)]);
+    if (!this.nc.isClosed()) await this.nc.close();
   }
 }

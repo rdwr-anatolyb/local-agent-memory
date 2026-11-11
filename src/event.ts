@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const EVENT_TYPES = [
   "task_assigned", "task_started", "heartbeat", "task_result",
   "finding", "decision", "code_change", "error", "question", "help_request", "handoff",
+  "kill", "gate_pending", "gate_decided", "status_changed", "child_link",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -30,10 +32,28 @@ export const ResultDetails = z.strictObject({
 });
 export const HeartbeatDetails = z.strictObject({ attempt: Attempt, seq_of_task_started: z.number().int().nonnegative() });
 
+/** Orchestrator-only events that describe a flow (spec section 4), not an agent's work. */
+export const FLOW_EVENTS: ReadonlySet<EventType> = new Set(["kill", "gate_pending", "gate_decided", "status_changed", "child_link"]);
+const Gate = { gate_id: z.string().min(1).max(200) }; // sdlc-flow's raw `<node key>#<iteration>.<attempt>`, payload only
+const KillDetails = z.strictObject({ by_parent: Id.optional() }).optional();
+const GatePendingDetails = z.strictObject({ ...Gate, doc_ref: z.string().min(1).max(500).optional() });
+const GateDecidedDetails = z.strictObject({
+  ...Gate,
+  decision: z.enum(["approve", "reject", "retry", "drop", "cancel"]),
+  feedback_ref: z.string().min(1).max(500).optional(),
+});
+const StatusChangedDetails = z.strictObject({ from: z.string().min(1).max(32).nullable(), to: z.string().min(1).max(32) });
+const ChildLinkDetails = z.strictObject({ parent: Id });
+
 const STRICT_DETAILS: Partial<Record<EventType, z.ZodType>> = {
   task_assigned: AssignedDetails,
   task_result: ResultDetails,
   heartbeat: HeartbeatDetails,
+  kill: KillDetails,
+  gate_pending: GatePendingDetails,
+  gate_decided: GateDecidedDetails,
+  status_changed: StatusChangedDetails,
+  child_link: ChildLinkDetails,
 };
 
 export const AmbEvent = z
@@ -59,6 +79,10 @@ export const AmbEvent = z
       if (typeof ref === "string" && ref !== `sdlc-flow://${ev.correlation_id}/${ev.task_id}`)
         ctx.addIssue({ code: "custom", path: ["payload", "details", "brief_ref"], message: "must be sdlc-flow://<this story>/<this task>" });
     }
+    if (FLOW_EVENTS.has(ev.event_type) && !ev.correlation_id)
+      ctx.addIssue({ code: "custom", path: ["correlation_id"], message: `${ev.event_type} needs a story` });
+    if ((ev.event_type === "gate_pending" || ev.event_type === "gate_decided") && !ev.task_id)
+      ctx.addIssue({ code: "custom", path: ["task_id"], message: `${ev.event_type} needs a node (task_id)` });
     const schema = STRICT_DETAILS[ev.event_type];
     if (!schema) return;
     const r = schema.safeParse(ev.payload.details);
@@ -83,3 +107,18 @@ export function filterFor(q: SubjectQuery): string {
   for (const p of parts) if (p !== undefined && !isToken(p)) throw new Error(`invalid subject token: ${JSON.stringify(p)}`);
   return `amb.ev.${parts.map((p) => p ?? "*").join(".")}`;
 }
+
+const SIMPLE_ID = /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$/;
+/**
+ * sdlc-flow Task IDs and node keys as bus tokens. Simple ids swap `.` for `_` and decode back; any other id gets a
+ * readable prefix and a sha256 suffix. Simple outputs never contain `__`, so the two forms cannot collide.
+ */
+export function encodeToken(raw: string): string {
+  if (raw === "") throw new Error("encodeToken: empty id");
+  if (SIMPLE_ID.test(raw) && raw.length <= 64) return raw.replaceAll(".", "_");
+  const hash = createHash("sha256").update(raw).digest("hex").slice(0, 12);
+  return `${raw.replaceAll(".", "_").replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 50)}__${hash}`;
+}
+
+/** The raw id of a simple token; undefined for a hashed one, which callers map back by re-encoding known ids. */
+export const decodeToken = (t: string): string | undefined => (t.includes("__") ? undefined : t.replaceAll("_", "."));

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { AmbEvent, filterFor, hbSubject, isToken, subjectFor, type AmbEventT } from "../src/event";
+import { AmbEvent, decodeToken, encodeToken, filterFor, hbSubject, isToken, subjectFor, type AmbEventT } from "../src/event";
 import { readIdentity } from "../src/identity";
 import { escapeLine, wrapEvents } from "../src/untrusted";
 
@@ -29,6 +29,33 @@ describe("subjects and filters", () => {
   test.each(["a.b", "*", ">", "a b", "", "x".repeat(65), "${AMB_TASK}"])("token %p rejected", (t) =>
     expect(isToken(t)).toBe(false));
   test("filterFor rejects a non-token", () => expect(() => filterFor({ project_id: "P", task_id: "a.>" })).toThrow());
+});
+
+describe("token helper", () => {
+  const pinned: [string, string][] = [
+    ["1-loop.0-code-review", "1-loop_0-code-review"],
+    ["a.b", "a_b"],
+    ["a_b", "a_b__648fa9b31bc7"],
+    ["My Task.md", "My-Task_md__4ce4806f957b"],
+    ["a".repeat(70) + ".b", "a".repeat(50) + "__88701e7ef31e"],
+  ];
+  test.each(pinned)("T-1 encodeToken(%p) is %p", (raw, token) => expect(encodeToken(raw)).toBe(token));
+  test("T-2 simple ids round-trip; a hashed form does not decode", () => {
+    for (const raw of ["1-loop.0-code-review", "S-17", "a.b"]) expect(decodeToken(encodeToken(raw))).toBe(raw);
+    expect(decodeToken(encodeToken("a_b"))).toBeUndefined();
+    expect(decodeToken(encodeToken("My Task.md"))).toBeUndefined();
+  });
+  test("T-3 every output is a token and never \"_\"; empty throws; a_b and a.b differ", () => {
+    const inputs = [...pinned.map(([raw]) => raw), "_", "日本", "a".repeat(300)];
+    for (const raw of inputs) {
+      const t = encodeToken(raw);
+      expect(isToken(t)).toBe(true);
+      expect(t).not.toBe("_");
+    }
+    expect(encodeToken("_")).toBe("___d2e2adf7177b");
+    expect(() => encodeToken("")).toThrow();
+    expect(encodeToken("a_b")).not.toBe(encodeToken("a.b"));
+  });
 });
 
 describe("event schema", () => {
@@ -79,8 +106,34 @@ describe("event schema", () => {
     expect(AmbEvent.safeParse({ ...base, payload: { summary: "s", details: { anything: [1, 2] } } }).success).toBe(true));
 });
 
+describe("flow events", () => {
+  const orch = { ...base, agent_id: "orch", correlation_id: "S-17", task_id: null };
+  const gate = { ...orch, task_id: "1-loop", payload: { summary: "s" } };
+  test("E-1 each flow type accepts its strict details and refuses an extra key", () => {
+    const ok = (over: Partial<AmbEventT>) => AmbEvent.safeParse({ ...orch, ...over }).success;
+    expect(ok({ event_type: "kill", payload: { summary: "s" } })).toBe(true);
+    expect(ok({ event_type: "kill", payload: { summary: "s", details: { by_parent: "S-1" } } })).toBe(true);
+    expect(ok({ event_type: "kill", payload: { summary: "s", details: { by_parent: "S-1", note: "x" } } })).toBe(false);
+    expect(ok({ ...gate, event_type: "gate_pending", payload: { summary: "s", details: { gate_id: "1-loop#1.1", doc_ref: "sdlc-flow://d" } } })).toBe(true);
+    expect(ok({ ...gate, event_type: "gate_pending", payload: { summary: "s", details: { gate_id: "g", note: "x" } } })).toBe(false);
+    expect(ok({ ...gate, event_type: "gate_decided", payload: { summary: "s", details: { gate_id: "g", decision: "approve" } } })).toBe(true);
+    expect(ok({ ...gate, event_type: "gate_decided", payload: { summary: "s", details: { gate_id: "g", decision: "reject", note: "x" } } })).toBe(false);
+    expect(ok({ event_type: "status_changed", payload: { summary: "s", details: { from: null, to: "assigned" } } })).toBe(true);
+    expect(ok({ event_type: "status_changed", payload: { summary: "s", details: { from: "assigned", to: "started", extra: 1 } } })).toBe(false);
+    expect(ok({ event_type: "child_link", payload: { summary: "s", details: { parent: "S-1" } } })).toBe(true);
+    expect(ok({ event_type: "child_link", payload: { summary: "s", details: { parent: "S.1" } } })).toBe(false);
+  });
+  test("E-2 a flow type without a story is refused; gate_pending without a node is refused; a bad decision is refused", () => {
+    expect(AmbEvent.safeParse({ ...orch, correlation_id: null, event_type: "kill", payload: { summary: "s" } }).success).toBe(false);
+    expect(AmbEvent.safeParse({ ...gate, task_id: null, event_type: "gate_pending", payload: { summary: "s", details: { gate_id: "g" } } }).success).toBe(false);
+    expect(AmbEvent.safeParse({ ...gate, event_type: "gate_decided", payload: { summary: "s", details: { gate_id: "g", decision: "maybe" } } }).success).toBe(false);
+  });
+  test("E-3 subjectFor keeps the five-token layout for a kill", () =>
+    expect(subjectFor({ ...orch, event_type: "kill" })).toBe("amb.ev.P.S-17._.orch.kill"));
+});
+
 describe("readIdentity", () => {
-  const env = { AMB_AGENT_ID: "w-T1-1", AMB_ROLE: "worker", AMB_PROJECT: "P", AMB_STORY: "S", AMB_TASK: "T1" };
+  const env ={ AMB_AGENT_ID: "w-T1-1", AMB_ROLE: "worker", AMB_PROJECT: "P", AMB_STORY: "S", AMB_TASK: "T1" };
   test("worker gets its task plus story broadcasts, from the start", () => {
     const id = readIdentity(env);
     expect(id.filter).toEqual(["amb.ev.P.S.T1.>", "amb.ev.P.S._.>"]);
@@ -93,6 +146,12 @@ describe("readIdentity", () => {
     const d = readIdentity({ AMB_AGENT_ID: "dash-1", AMB_ROLE: "dashboard", AMB_PROJECT: "P" });
     expect([d.filter, d.cursorStart]).toEqual([["amb.ev.P.>"], "new"]);
     expect(readIdentity({ AMB_AGENT_ID: "a", AMB_ROLE: "agent", AMB_PROJECT: "P" }).role).toBe("agent");
+  });
+  test("I-1 orchestrator: whole-project filter from all, AMB_FILTER ignored, no story or task", () => {
+    expect(readIdentity({ AMB_AGENT_ID: "orch", AMB_ROLE: "orchestrator", AMB_PROJECT: "P", AMB_FILTER: "amb.ev.P.X.>", AMB_CURSOR_START: "new" }))
+      .toMatchObject({ filter: ["amb.ev.P.>"], cursorStart: "all", role: "orchestrator" });
+    expect(() => readIdentity({ AMB_AGENT_ID: "orch", AMB_ROLE: "orchestrator", AMB_PROJECT: "P", AMB_STORY: "S" })).toThrow(/unset AMB_STORY/);
+    expect(() => readIdentity({ AMB_AGENT_ID: "orch", AMB_ROLE: "orchestrator", AMB_PROJECT: "P", AMB_TASK: "T" })).toThrow(/unset AMB_STORY/);
   });
   test("ad hoc agent may override filter; worker may not", () => {
     expect(readIdentity({ AMB_AGENT_ID: "a", AMB_ROLE: "agent", AMB_PROJECT: "P", AMB_FILTER: "amb.ev.P.X.>", AMB_CURSOR_START: "new" }))
