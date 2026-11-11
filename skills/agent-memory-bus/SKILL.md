@@ -47,7 +47,8 @@ To retry a publish safely, pass the same `event_id` again. The bus stores it onc
 
 The server refuses a few things, whatever you ask:
 
-- Only `AMB_ROLE=planner` may publish `task_assigned`. It needs `to_agent`, and its `details` must be exactly `{brief_ref, attempt}`.
+- Only `AMB_ROLE=planner` or `AMB_ROLE=orchestrator` may publish `task_assigned`. It needs `to_agent`, and its `details` must be exactly `{brief_ref, attempt}`.
+- Only `AMB_ROLE=orchestrator` may publish `kill`, `gate_pending`, `gate_decided`, `status_changed` and `child_link`. An orchestrator may also publish `task_started`, `task_result` and `error` for any story in its project, but must name the attempt's assignee in `to_agent`. It sends no heartbeats.
 - `brief_ref` must be exactly `sdlc-flow://<story>/<task>` for the assignment's own story and task.
 - An event whose escaped form exceeds about 48 KB is refused. Point to a file or commit instead of pasting large content.
 - `task_started` and `task_result` need an identity with a story and a task, and must be about that story and task. `error` must be about your own story and task, or, for an identity without a task, about no task. `task_result` `details` must be `{outcome: "completed" | "failed", attempt, artifacts?: [{kind: "branch" | "commit" | "pr" | "file", ref}]}`.

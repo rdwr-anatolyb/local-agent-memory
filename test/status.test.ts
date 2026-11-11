@@ -228,3 +228,57 @@ describe("heartbeatFrom", () => {
     expect(heartbeatFrom("amb.hb.P.ZZ.T.A", hbEv(), NOW)).toBeUndefined());
   test("not an event at all", () => expect(heartbeatFrom("amb.hb.P.S.T.A", { agent_id: "A", timestamp: "x" }, NOW)).toBeUndefined());
 });
+
+describe("orchestrator events (flow engine)", () => {
+  const by = (agent: string, attempt: number, to: string, at: number, task = "T1") =>
+    ev("task_assigned", agent, at, { task_id: task, to_agent: to, details: { brief_ref: `r/${task}`, attempt } });
+  const noSeq = (ss: ReturnType<typeof deriveStatus>) => ss.map(({ lastSeq: _, ...rest }) => rest);
+
+  test("S-1 an orchestrator's lifecycle for the assignee it assigned attaches to that attempt", () => {
+    const evs = [
+      by("orch", 1, "w-T1-1", 0),
+      ev("task_started", "orch", 1000, { to_agent: "w-T1-1" }),
+      ev("task_result", "orch", 2000, { to_agent: "w-T1-1", details: { outcome: "completed", attempt: 1 } }),
+    ];
+    expect(one(evs, [], 3000)).toMatchObject({ state: "completed", assignee: "w-T1-1", attempt: 1 });
+  });
+
+  test("S-2 a lifecycle event from someone who did not assign that attempt is ignored", () => {
+    const evs = [by("orch", 1, "w-T1-1", 0), ev("task_result", "w-T2-1", 10, { to_agent: "w-T1-1", details: { outcome: "completed", attempt: 1 } })];
+    expect(one(evs, [], 100)).toMatchObject({ state: "assigned", assignee: "w-T1-1" });
+  });
+
+  test("S-3 flow events change nothing but the story's lastSeq; a story with only flow events is not listed", () => {
+    const core = [
+      by("orch", 1, "w-T1-1", 0),
+      ev("task_started", "w-T1-1", 1000),
+      ev("task_result", "w-T1-1", 2000, { details: { outcome: "completed", attempt: 1 } }),
+    ];
+    const flow = [
+      ev("gate_pending", "orch", 500, { task_id: "1-loop", details: { gate_id: "1-loop#1.1" } }),
+      ev("gate_decided", "orch", 1500, { task_id: "1-loop", details: { gate_id: "1-loop#1.1", decision: "approve" } }),
+      ev("status_changed", "orch", 1600, { task_id: null, details: { from: "assigned", to: "started" } }),
+      ev("child_link", "orch", 1700, { task_id: null, details: { parent: "S-0" } }),
+      ev("kill", "orch", 1800, { task_id: null }),
+    ];
+    const withFlow = [...core.slice(0, 1), ...flow, ...core.slice(1)];
+    const without = deriveStatus(core, [], T0 + 3000, th);
+    const mixed = deriveStatus(withFlow, [], T0 + 3000, th);
+    expect(noSeq(mixed)).toEqual(noSeq(without));
+    expect(mixed[0]!.lastSeq).toBeGreaterThan(without[0]!.lastSeq);
+    expect(deriveStatus([ev("kill", "orch", 0, { correlation_id: "S-9", task_id: null })], [], T0, th)).toEqual([]);
+  });
+
+  test("S-4 a retry through the orchestrator supersedes the failed attempt", () => {
+    const evs = [
+      by("orch", 1, "x-a1", 0),
+      ev("task_started", "orch", 1000, { to_agent: "x-a1" }),
+      ev("error", "orch", 2000, { to_agent: "x-a1", payload: { summary: "boom" } }),
+      by("orch", 2, "x-a2", 3000),
+    ];
+    expect(one(evs, [], 4000)).toMatchObject({
+      attempt: 2, assignee: "x-a2", state: "assigned",
+      superseded: [{ attempt: 1, agent: "x-a1", state: "failed" }],
+    });
+  });
+});

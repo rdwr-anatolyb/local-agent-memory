@@ -5,7 +5,7 @@ import { connect } from "@nats-io/transport-node";
 import { jetstreamManager } from "@nats-io/jetstream";
 import { nanos } from "@nats-io/nats-core";
 import type { MemoryBus } from "../src/bus";
-import type { StoredEvent } from "../src/event";
+import { encodeToken, type StoredEvent } from "../src/event";
 import { ensureServer, findServerBin, stopServer } from "../src/server";
 // Deep import: the class every JsMsg comes from, used to inject ACK faults.
 import { JsMsgImpl } from "../node_modules/@nats-io/jetstream/lib/jsmsg.js";
@@ -492,6 +492,20 @@ describe("role scenarios (amb mcp subprocesses over stdio)", () => {
     await until(async () => task(await status(pl, { correlation_id: S }), S, "T3")?.state === "unclaimed", 5000);
     await pl.close();
   });
+
+  test("A-1 an agent session publishes by Task ID and node key; a publish outside its project is refused", async () => {
+    const cid = encodeToken("My Task.md"), node = encodeToken("1-loop.0-code-review");
+    const sess = await role("agentA", { AMB_ROLE: "agent", AMB_AGENT_ID: "sess-1" });
+    const types = ["finding", "decision", "question", "handoff"] as const;
+    for (const t of types) expect((await sess.call("publish_event", { event_type: t, summary: t, correlation_id: cid, task_id: node })).isError).toBe(false);
+    const back = (await sess.call("replay_events", { correlation_id: cid, task_id: node })).items as StoredEvent[];
+    expect(back.map((e) => [e.event_type, e.project_id, e.correlation_id, e.task_id])).toEqual(types.map((t) => [t, "agentA", cid, node]));
+    expect((await sess.call("publish_event", { event_type: "finding", summary: "x", project_id: "other" })).isError).toBe(true);
+    const other = await h.open({ AMB_PROJECT: "other", AMB_ROLE: "agent", AMB_AGENT_ID: "o-1" });
+    expect(await other.replay({ correlation_id: cid })).toEqual([]);
+    await other.close();
+    await sess.close();
+  });
 });
 
 /** Replaces JsMsg.ackAck for the next `times` calls. */
@@ -926,6 +940,67 @@ const legacyEvent = (o: Record<string, unknown>) => ({
   agent_id: "old", event_type: "finding", tags: [], to_agent: null, to_task: null, payload: { summary: "legacy" }, ...o,
 });
 
+describe("flow engine upstream (library)", () => {
+  const flowEnv = (extra: Record<string, string>) => ({ AMB_PROJECT: "flow1", ...extra });
+
+  test("O-1 an orchestrator publishes every flow type for any story in its project; other roles are refused", async () => {
+    const orch = await h.open(flowEnv({ AMB_ROLE: "orchestrator", AMB_AGENT_ID: "orch-1" }));
+    await orch.publish({ event_type: "task_assigned", correlation_id: "S-1", task_id: "T1", to_agent: "w-S-1-T1-1", summary: "a", details: { brief_ref: "sdlc-flow://S-1/T1", attempt: 1 } });
+    await orch.publish({ event_type: "kill", correlation_id: "S-1", summary: "killed" });
+    await orch.publish({ event_type: "gate_pending", correlation_id: "S-1", task_id: "1-loop", summary: "g", details: { gate_id: "1-loop#1.1" } });
+    await orch.publish({ event_type: "gate_decided", correlation_id: "S-1", task_id: "1-loop", summary: "d", details: { gate_id: "1-loop#1.1", decision: "approve" } });
+    await orch.publish({ event_type: "status_changed", correlation_id: "S-2", summary: "s", details: { from: null, to: "assigned" } });
+    await orch.publish({ event_type: "child_link", correlation_id: "S-2", summary: "c", details: { parent: "S-1" } });
+    await orch.publish({ event_type: "task_started", correlation_id: "S-2", task_id: "T1", to_agent: "w-S-2-T1-1", summary: "started" });
+    const s1 = await orch.replay({ correlation_id: "S-1" });
+    const s2 = await orch.replay({ correlation_id: "S-2" });
+    expect(s1.map((e) => e.event_type)).toEqual(["task_assigned", "kill", "gate_pending", "gate_decided"]);
+    expect(s2.map((e) => [e.event_type, e.project_id, e.agent_id])).toEqual([["status_changed", "flow1", "orch-1"], ["child_link", "flow1", "orch-1"], ["task_started", "flow1", "orch-1"]]);
+
+    const worker = await h.open(flowEnv({ AMB_ROLE: "worker", AMB_STORY: "S-1", AMB_TASK: "T1", AMB_AGENT_ID: "w-S-1-T1-1" }));
+    const planner = await h.open(flowEnv({ AMB_ROLE: "planner", AMB_AGENT_ID: "planner-1" }));
+    const agent = await h.open(flowEnv({ AMB_ROLE: "agent", AMB_AGENT_ID: "ag-1" }));
+    const kill = { event_type: "kill" as const, correlation_id: "S-1", summary: "k" };
+    await expect(worker.publish(kill)).rejects.toThrow("only AMB_ROLE=orchestrator may publish kill");
+    await expect(planner.publish(kill)).rejects.toThrow("only AMB_ROLE=orchestrator may publish kill");
+    await expect(agent.publish(kill)).rejects.toThrow("only AMB_ROLE=orchestrator may publish kill");
+    await expect(worker.publish({ event_type: "task_assigned", task_id: "T1", to_agent: "x", summary: "a", details: { brief_ref: "sdlc-flow://S-1/T1", attempt: 1 } }))
+      .rejects.toThrow("only AMB_ROLE=planner or orchestrator may publish task_assigned");
+    await Promise.all([orch.close(), worker.close(), planner.close(), agent.close()]);
+  });
+
+  test("O-2 an orchestrator's lifecycle event without to_agent is refused, and an orchestrator never heartbeats", async () => {
+    const orch = await h.open(flowEnv({ AMB_ROLE: "orchestrator", AMB_AGENT_ID: "orch-2" }));
+    await expect(orch.publish({ event_type: "task_started", correlation_id: "S-3", task_id: "T1", summary: "s" }))
+      .rejects.toThrow("task_started from an orchestrator needs correlation_id, task_id and to_agent");
+    await orch.publish({ event_type: "task_started", correlation_id: "S-3", task_id: "T1", to_agent: "w-S-3-T1-1", summary: "s" });
+    await Bun.sleep(200);
+    expect(await lastHeartbeat("amb.hb.flow1.S-3.T1.orch-2")).toBe(0);
+    await orch.close();
+  });
+
+  test("O-3 retry attempts through the orchestrator: the newest attempt wins and a re-publish does not reset it", async () => {
+    const orch = await h.open(flowEnv({ AMB_ROLE: "orchestrator", AMB_AGENT_ID: "orch-3" }));
+    const assign = (attempt: number) => orch.publish({
+      event_type: "task_assigned", correlation_id: "S-4", task_id: "T1", to_agent: `w-S-4-T1-${attempt}`, summary: "a",
+      details: { brief_ref: "sdlc-flow://S-4/T1", attempt },
+    });
+    await assign(1);
+    await orch.publish({ event_type: "task_started", correlation_id: "S-4", task_id: "T1", to_agent: "w-S-4-T1-1", summary: "s" });
+    await assign(2);
+    await orch.publish({ event_type: "task_started", correlation_id: "S-4", task_id: "T1", to_agent: "w-S-4-T1-2", summary: "s" });
+    await orch.publish({ event_type: "task_result", correlation_id: "S-4", task_id: "T1", to_agent: "w-S-4-T1-2", summary: "done", details: { outcome: "completed", attempt: 2 } });
+    const t = task(await orch.getStatus({ correlation_id: "S-4" }), "S-4", "T1")!;
+    expect(t).toMatchObject({ state: "completed", attempt: 2, assignee: "w-S-4-T1-2" });
+    expect(t.superseded.map((s) => s.attempt)).toEqual([1]);
+
+    const again = await orch.publish({ event_type: "task_assigned", correlation_id: "S-4", task_id: "T1", to_agent: "w-S-4-T1-2", summary: "a", details: { brief_ref: "sdlc-flow://S-4/T1", attempt: 2 } });
+    expect(again.duplicate).toBe(false);
+    expect(task(await orch.getStatus({ correlation_id: "S-4" }), "S-4", "T1")).toMatchObject({ state: "completed", attempt: 2 });
+    await orch.close();
+  });
+});
+
 describe("round 4 fixes (library)", () => {
   test("R4/r4_abort a cancelled read returns nothing and NAKs only its own messages", async () => {
     const a = await h.open({ AMB_PROJECT: "r4a", AMB_AGENT_ID: "A" });
@@ -1177,5 +1252,54 @@ describe("round 6 fixes (MCP)", () => {
     expect(r.items[0].tasks_omitted).toBeGreaterThan(0);
     expect(r.text).toContain('replay_events {correlation_id: "BIG", event_type: "task_assigned"}');
     await ag.close();
+  });
+});
+
+describe("shutdown (close)", () => {
+  /** Races a promise against a short timer, so a hang fails the test instead of stalling the run. */
+  const settleWithin = <T>(p: Promise<T>, ms = 5000): Promise<T | "timeout"> =>
+    Promise.race([p, Bun.sleep(ms).then(() => "timeout" as const)]);
+
+  test("C1 close while up: resolves, and the closed bus rejects its next read", async () => {
+    const h1 = new NatsHarness();
+    await h1.start();
+    try {
+      const bus = await h1.open({ AMB_PROJECT: "c1", AMB_AGENT_ID: "A" });
+      expect(await settleWithin(bus.close().then(() => "closed"))).toBe("closed");
+      expect(await settleWithin(bus.read({ max: 1 }).then(() => "resolved", () => "rejected"))).toBe("rejected");
+    } finally {
+      await h1.dispose();
+    }
+  });
+
+  test("C2 close after the server stopped: resolves, and the closed bus does not reconnect", async () => {
+    const h2 = new NatsHarness();
+    await h2.start();
+    try {
+      const bus = await h2.open({ AMB_PROJECT: "c2", AMB_AGENT_ID: "A" });
+      await h2.stop();
+      await Bun.sleep(500);
+      expect(await settleWithin(bus.close().then(() => "closed"))).toBe("closed");
+      await h2.start();
+      await Bun.sleep(1000);
+      expect(await settleWithin(bus.read({ max: 1 }).then(() => "resolved", () => "rejected"))).toBe("rejected");
+    } finally {
+      await h2.dispose();
+    }
+  });
+
+  test("C3 close with a read in flight while down: close resolves and the read settles", async () => {
+    const h3 = new NatsHarness();
+    await h3.start();
+    try {
+      const bus = await h3.open({ AMB_PROJECT: "c3", AMB_AGENT_ID: "A" });
+      const read = settleWithin(bus.read({ waitMs: 5000 }).then(() => "resolved", () => "rejected"));
+      await Bun.sleep(300);
+      await h3.stop();
+      expect(await settleWithin(bus.close().then(() => "closed"))).toBe("closed");
+      expect(await read).not.toBe("timeout");
+    } finally {
+      await h3.dispose();
+    }
   });
 });

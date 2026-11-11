@@ -34,17 +34,46 @@ bun src/main.ts server stop     # signals only a nats-server whose -sd is this h
 
 `amb mcp` also starts the server on demand. `AMB_URL` and `AMB_HOME` override the address and the data directory.
 
+### Windows (unverified)
+
+The Windows code path is unit-tested on macOS with a fake platform, fake `run`, `kill` and `spawn`. It has not been run on Windows. Only these are established:
+
+- `nats-server.exe` is found through `Bun.which("nats-server.exe")`, or through `AMB_NATS_SERVER_BIN` (set it to the full path of the `.exe`). The missing-binary message names the release page, not brew.
+- `server stop` finds a server by querying `Get-CimInstance Win32_Process` through `powershell`, then matches the binary name and the `-sd` store dir case-insensitively.
+- `server start` spawns detached with `windowsHide`.
+
+Not verified, and treat each as an open risk:
+
+- Whether the detached server keeps running after `server start` exits (Bun issue oven-sh/bun#31603 is unconfirmed).
+- Whether `powershell` and CIM are present, which execution policy applies, and the 1-2 s PowerShell start cost.
+- The exact command-line text Windows reports for quoted paths, 8.3 short names and drive-letter case, and whether `nats-server` records `-sd` as passed.
+- Whether `Bun.which("nats-server")` finds the bare name on Windows without the `.exe` retry.
+- Whether a `-sd` store written with forward slashes is matched the same way.
+- `server stop` sends SIGTERM, which Windows treats as an unconditional kill. JetStream recovery after that is untested here.
+
 ## Wire an agent
 
 Each agent process needs its own identity in the environment. `amb mcp` refuses to start without `AMB_AGENT_ID`, `AMB_PROJECT` and `AMB_ROLE`. A worker id is unique per attempt: a retried task gets a new id and a fresh cursor.
 
-| Variable | Worker | Planner | Dashboard |
-|---|---|---|---|
-| `AMB_AGENT_ID` | `w-<story>-<task>-<attempt>` | `planner-<story>` | `dash-<n>` |
-| `AMB_ROLE` | `worker` | `planner` | `dashboard` |
-| `AMB_PROJECT` | project slug | same | same |
-| `AMB_STORY` | story id | story id | unset |
-| `AMB_TASK` | task id | unset | unset |
+| Variable | Worker | Planner | Dashboard | Orchestrator |
+|---|---|---|---|---|
+| `AMB_AGENT_ID` | `w-<story>-<task>-<attempt>` | `planner-<story>` | `dash-<n>` | `orch-<n>` |
+| `AMB_ROLE` | `worker` | `planner` | `dashboard` | `orchestrator` |
+| `AMB_PROJECT` | project slug | same | same | same |
+| `AMB_STORY` | story id | story id | unset | must be unset |
+| `AMB_TASK` | task id | unset | unset | must be unset |
+
+The orchestrator (sdlc-flow's engine) acts on every story in its project. It may publish `task_assigned`, the flow events `kill`, `gate_pending`, `gate_decided`, `status_changed` and `child_link`, and lifecycle events (`task_started`, `task_result`, `error`) on behalf of an assignee. It must name that assignee in `to_agent`, and status counts the event only if the orchestrator made that assignment. Only the orchestrator may publish flow events. It sends no heartbeats, so an attempt it starts shows `stalled` 90 s after `task_started`. sdlc-flow must use its own lease for those attempts, not amb's `stalled` state. A retry is a new `task_assigned` with a new attempt number and a new `to_agent`; reusing an `event_id` across attempts makes the bus drop the retry as a duplicate for 24 h.
+
+For sdlc-flow Tasks, `correlation_id` is the Task ID and `task_id` is the node key, both encoded with `encodeToken`. The `publish_event` input refuses unknown keys, so a `project_id` argument is an error, not an override.
+
+## Library entry
+
+`package.json` exports `src/index.ts`, so sdlc-flow can depend on this repo by git and import `MemoryBus`, `readIdentity`, `ensureServer`, `stopServer`, `serverStatus`, the event schema and `encodeToken`/`decodeToken`. Importing the entry starts nothing and prints nothing; `src/main.ts` runs only as the `amb` command. The MCP server (`src/mcp.ts`) is not exported, so library callers do not load the MCP SDK.
+
+`busOverview({ url })` and `busMessages({ url, project?, beforeSeq?, limit? })` inspect a running bus for a status page. Both are read-only and create no reader: they open their own short connection, never a `MemoryBus`, so they add no cursor. `busOverview` returns the stream's counts and retention, the heartbeat count, the server version and each durable cursor (`project`, `agent`, unread, unconfirmed). `busMessages` returns up to `limit` (1 to 200) events, newest first, optionally of one project and before a seq, with `nextBefore` for the next page. Each call reads at most 2000 seqs, so a page may be empty while `nextBefore` is set. Summaries are cut to 160 characters, and details are kept, cut to 200, only for the types with a pointer schema; free-form details never leave the bus.
+
+`encodeToken` maps a Task ID or node key to a bus token. An id made of `[A-Za-z0-9-]` segments joined by `.` (at most 64 characters) becomes the same text with `.` replaced by `_`, and `decodeToken` reverses it. Any other id becomes a readable prefix of at most 50 characters, `__`, and a 12-hex sha256 suffix. `decodeToken` returns `undefined` for those; map them back from the id list you already hold.
 
 Claude Code (`.mcp.json` in the worktree):
 

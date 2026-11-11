@@ -133,10 +133,12 @@ export function createMcpServer(bus: MemoryBus): McpServer {
     description:
       `Append one event as ${id.agentId}; identity, project, story and task are stamped from the environment. ` +
       "Prefer semantic events: finding, decision, question, help_request, handoff, code_change. Keep summary short and factual; " +
-      "never publish raw reasoning or secrets. task_assigned is planner-only: to_agent, task_id, details {brief_ref: sdlc-flow://<story>/<task>, attempt}. " +
+      "never publish raw reasoning or secrets. task_assigned is planner or orchestrator only: to_agent, task_id, details {brief_ref: sdlc-flow://<story>/<task>, attempt}. " +
       "task_started, task_result and error describe your own task only; task_result details " +
-      "{outcome: completed|failed, attempt, artifacts?:[{kind: branch|commit|pr|file, ref}]}. Pass event_id to retry safely.",
-    inputSchema: {
+      "{outcome: completed|failed, attempt, artifacts?:[{kind: branch|commit|pr|file, ref}]}. Pass event_id to retry safely. " +
+      "correlation_id = the Task ID and task_id = the node key, both encoded with encodeToken; flow events (kill, gate_*, status_changed, child_link) are orchestrator-only.",
+    // strictObject: an unknown key (such as a project_id) is refused, not silently dropped.
+    inputSchema: z.strictObject({
       event_type: z.enum(PUBLISHABLE),
       summary: z.string().max(MAX_SUMMARY),
       details: z.record(z.string(), z.unknown()).optional(),
@@ -145,7 +147,7 @@ export function createMcpServer(bus: MemoryBus): McpServer {
       to_agent: Token.optional(),
       tags: tags.optional(),
       event_id: Token.optional(),
-    },
+    }),
   }, async (a) => json(await bus.publish(a)));
 
   server.registerTool("read_events", {
